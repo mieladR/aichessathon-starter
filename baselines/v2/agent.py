@@ -254,7 +254,7 @@ MOBILITY_EG = (0, 0, 4, 5, 4, 3, 0)
 # It only applies from the second attacker on, because one piece pointing at a
 # king is not an attack.
 KING_ATTACK_WEIGHT = (0, 0, 2, 2, 3, 5, 0)
-KING_DANGER = tuple(min(300, units * units // 6) for units in range(96))
+KING_DANGER = tuple(min(400, units * units // 3) for units in range(96))
 MAX_DANGER_INDEX = len(KING_DANGER) - 1
 # Having the move is worth something, and saying so stops the evaluation from
 # swinging by a whole tempo between odd and even plies.
@@ -704,7 +704,7 @@ transposition_table: dict[int, TTEntry] = {}
 # Each entry is an int key and a four-tuple, so a few hundred megabytes at most,
 # well inside the 2 GB the container gives us. When it fills, throw it away
 # rather than trying to be clever about which half to keep.
-TT_LIMIT = 800_000
+TT_LIMIT = 400_000
 
 killer_moves: dict[int, list[chess.Move]] = {}
 history_heuristic: dict[tuple[bool, int, int], int] = {}
@@ -727,9 +727,6 @@ MATE_BOUND = MATE_SCORE - 1000
 # Pruning and reduction knobs.
 RFP_MARGIN = 85
 DELTA_MARGIN = 120
-# Indexed by depth. A quiet move at depth one or two that cannot get within this
-# of alpha even granting it a free tempo is not going to raise alpha.
-FUTILITY_MARGIN = (0, 150, 300)
 ASPIRATION_WINDOW = 25
 # How far back a late, quiet move gets reduced, by (depth, move number). The
 # logarithms are the standard shape: reduce more the deeper we are and the
@@ -1067,13 +1064,6 @@ def negamax(
     if depth <= 0:
         return quiescence(board, alpha, beta, ply, 0, deadline)
 
-    # No table move here means the ordering at this node is a guess, and a deep
-    # search on a guessed order is mostly wasted. Search one ply shallower; the
-    # entry that leaves behind makes the re-search that follows much cheaper.
-    if tt_move is None and depth >= 4:
-        depth -= 1
-
-    static = 0
     in_check = board.is_check()
     if in_check:
         # Check extension: a forced sequence is exactly where a fixed depth cuts
@@ -1134,21 +1124,6 @@ def negamax(
         gives_check = board.is_check()
         game_history[child_key] = game_history.get(child_key, 0) + 1
         try:
-            # Futility: at the last ply or two before quiescence, a quiet move
-            # from a position already this far below alpha has no way to get
-            # back, and searching it only confirms that.
-            if (
-                number
-                and not is_pv
-                and not in_check
-                and not gives_check
-                and not capture
-                and depth <= 2
-                and move.promotion is None
-                and best_score > -MATE_BOUND
-                and static + FUTILITY_MARGIN[depth] <= alpha
-            ):
-                continue
             # Late move reductions. Once the ordering has been wrong about the
             # first few moves and we are still here, the rest are unlikely to be
             # best, so search them shallower and only pay full price for the ones
