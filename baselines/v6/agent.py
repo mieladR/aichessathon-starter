@@ -25,22 +25,11 @@ import math
 import random
 import sys
 import time
-from typing import Any
 
 import chess
+import fasteval
 
 import endgame
-
-# The compiled evaluation is an optimisation, not a dependency. If numba is
-# missing or will not compile on the machine we are handed, the Python
-# evaluation below is still correct, and a slower correct agent beats no agent.
-try:
-    import fasteval
-
-    _evaluator: Any = fasteval
-except Exception as _exc:
-    _evaluator = None
-    print(f"fasteval unavailable, using the Python evaluation: {_exc!r}")
 
 # Alpha-beta recurses one Python frame per ply, and check extensions on top of
 # quiescence can stack a hundred of them on a forcing line. The default limit
@@ -267,7 +256,7 @@ MOBILITY_EG = (0, 0, 4, 5, 4, 3, 0)
 # It only applies from the second attacker on, because one piece pointing at a
 # king is not an attack.
 KING_ATTACK_WEIGHT = (0, 0, 2, 2, 3, 5, 0)
-KING_DANGER = tuple(min(300, units * units // 6) for units in range(96))
+KING_DANGER = tuple(min(400, units * units // 3) for units in range(96))
 MAX_DANGER_INDEX = len(KING_DANGER) - 1
 # Having the move is worth something, and saying so stops the evaluation from
 # swinging by a whole tempo between odd and even plies.
@@ -603,22 +592,17 @@ def _ordinary_score(board: chess.Board) -> int:
     return (tapered if board.turn == chess.WHITE else -tapered) + TEMPO
 
 
-if _evaluator is not None:
-    try:
-        _evaluator.install(
-            MG_WHITE, EG_WHITE, MG_BLACK, EG_BLACK, PHASE_WEIGHT,
-            FORWARD_FILE, PASSED_MASK, KING_SHIELD_MASK,
-            KING_DANGER, MOBILITY_MG, MOBILITY_EG, KING_ATTACK_WEIGHT,
-        )
-    except Exception as _exc:  # a compile failure is not worth a lost game
-        _evaluator = None
-        print(f"fasteval would not compile, using the Python evaluation: {_exc!r}")
+fasteval.install(
+    MG_WHITE, EG_WHITE, MG_BLACK, EG_BLACK, PHASE_WEIGHT,
+    FORWARD_FILE, PASSED_MASK, KING_SHIELD_MASK,
+    KING_DANGER, MOBILITY_MG, MOBILITY_EG, KING_ATTACK_WEIGHT,
+)
 
 
 def _compiled_score(board: chess.Board) -> int:
     """The same number as `_ordinary_score`, computed by the compiled version."""
     return int(
-        _evaluator.score(
+        fasteval.score(
             board.pawns,
             board.knights,
             board.bishops,
@@ -632,7 +616,7 @@ def _compiled_score(board: chess.Board) -> int:
     )
 
 
-def _compiled_agrees(positions: int = 1200) -> bool:
+def _compiled_agrees(positions: int = 300) -> bool:
     """Walk random games and insist the two evaluations return the same number.
 
     numba is the one thing here whose behaviour we cannot fully predict on a
@@ -657,7 +641,7 @@ def _compiled_agrees(positions: int = 1200) -> bool:
 
 
 _started_at = time.monotonic()
-_USE_COMPILED = _evaluator is not None and _compiled_agrees()
+_USE_COMPILED = _compiled_agrees()
 _score_position = _compiled_score if _USE_COMPILED else _ordinary_score
 print(
     f"evaluation: {'compiled' if _USE_COMPILED else 'PYTHON FALLBACK'}, "
@@ -788,7 +772,7 @@ transposition_table: dict[int, TTEntry] = {}
 # Each entry is an int key and a four-tuple, so a few hundred megabytes at most,
 # well inside the 2 GB the container gives us. When it fills, throw it away
 # rather than trying to be clever about which half to keep.
-TT_LIMIT = 800_000
+TT_LIMIT = 400_000
 
 killer_moves: dict[int, list[chess.Move]] = {}
 history_heuristic: dict[tuple[bool, int, int], int] = {}
@@ -811,9 +795,6 @@ MATE_BOUND = MATE_SCORE - 1000
 # Pruning and reduction knobs.
 RFP_MARGIN = 85
 DELTA_MARGIN = 120
-# Indexed by depth. A quiet move at depth one or two that cannot get within this
-# of alpha even granting it a free tempo is not going to raise alpha.
-FUTILITY_MARGIN = (0, 150, 300)
 ASPIRATION_WINDOW = 25
 # How far back a late, quiet move gets reduced, by (depth, move number). The
 # logarithms are the standard shape: reduce more the deeper we are and the
@@ -1151,13 +1132,6 @@ def negamax(
     if depth <= 0:
         return quiescence(board, alpha, beta, ply, 0, deadline)
 
-    # No table move here means the ordering at this node is a guess, and a deep
-    # search on a guessed order is mostly wasted. Search one ply shallower; the
-    # entry that leaves behind makes the re-search that follows much cheaper.
-    if tt_move is None and depth >= 4:
-        depth -= 1
-
-    static = 0
     in_check = board.is_check()
     if in_check:
         # Check extension: a forced sequence is exactly where a fixed depth cuts
@@ -1218,21 +1192,6 @@ def negamax(
         gives_check = board.is_check()
         game_history[child_key] = game_history.get(child_key, 0) + 1
         try:
-            # Futility: at the last ply or two before quiescence, a quiet move
-            # from a position already this far below alpha has no way to get
-            # back, and searching it only confirms that.
-            if (
-                number
-                and not is_pv
-                and not in_check
-                and not gives_check
-                and not capture
-                and depth <= 2
-                and move.promotion is None
-                and best_score > -MATE_BOUND
-                and static + FUTILITY_MARGIN[depth] <= alpha
-            ):
-                continue
             # Late move reductions. Once the ordering has been wrong about the
             # first few moves and we are still here, the rest are unlikely to be
             # best, so search them shallower and only pay full price for the ones
@@ -1369,10 +1328,6 @@ def _root_search(
 
 SAFETY_MARGIN_MS = 300
 MIN_BUDGET_MS = 20
-# What counts as low on time, as a multiple of the increment, and the fraction of
-# the increment to spend once we are.
-LOW_CLOCK_MULTIPLE = 10
-LOW_CLOCK_SPEND = 0.6
 MAX_INCREMENT_MS = 5_000
 
 _previous_left_ms: int | None = None
@@ -1404,13 +1359,6 @@ def _limits(time_left_ms: int, fullmove_number: int) -> tuple[float, float]:
     soft = usable / moves_left + _increment_ms * 0.75
     soft = min(soft, usable * 0.35)
     hard = min(soft * 2.6, usable * 0.55)
-    # Running low, spend under the increment so the clock climbs back instead of
-    # settling just above zero. Without this the budget converges on "spend what
-    # arrives", which parks us a few hundred milliseconds from a flag for the
-    # rest of a long game and leaves nothing to absorb one slow move.
-    if _increment_ms and time_left_ms < LOW_CLOCK_MULTIPLE * _increment_ms:
-        soft = min(soft, _increment_ms * LOW_CLOCK_SPEND)
-        hard = min(hard, _increment_ms * LOW_CLOCK_SPEND * 1.5)
     return max(soft, MIN_BUDGET_MS) / 1000, max(hard, MIN_BUDGET_MS) / 1000
 
 
@@ -1497,13 +1445,6 @@ def get_move(fen: str, time_left_ms: int) -> str:
     except TimeUp:
         pass
     except Exception as exc:  # a crash here is an instant loss, so catch everything
-        # Whatever went wrong, do not spend the rest of the game rediscovering
-        # it. The Python evaluation is the one we can reason about, so drop to
-        # it permanently and keep playing.
-        global _score_position
-        if _score_position is not _ordinary_score:
-            _score_position = _ordinary_score
-            print("dropped to the Python evaluation for the rest of the game")
         print(f"search error, falling back: {exc!r}")
 
     if best_move not in legal_moves:

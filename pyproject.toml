@@ -35,3 +35,11 @@ ignore = ["N818"]
 [tool.mypy]
 strict = true
 files = ["agent.py", "endgame.py", "harness"]
+
+# fasteval is numba kernels over numpy uint64 bitboards. mypy reads every bit
+# operation as a numpy scalar rather than an int, which is true and useless:
+# what the module has to guarantee is that it returns the same number as the
+# Python evaluation, and agent.py checks exactly that at import.
+[[tool.mypy.overrides]]
+module = ["fasteval"]
+ignore_errors = true

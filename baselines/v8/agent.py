@@ -1369,6 +1369,16 @@ def _root_search(
 
 SAFETY_MARGIN_MS = 300
 MIN_BUDGET_MS = 20
+# How far past the soft budget an iteration may be forecast to run and still be
+# worth starting. At 1.3 we were finishing lost games with a quarter of the
+# clock unspent, which against an opponent that can punish a shallow search is
+# the worse mistake: the whole point of the budget is to be spent. The hard cap
+# still bounds any single move and the low-clock rule below still guarantees the
+# floor, so being wrong here costs depth, never a flag.
+REACH = 1.7
+# A best move that has survived four deepenings rarely changes on the fifth, so
+# it gets less rope.
+SETTLED_REACH = 1.15
 # What counts as low on time, as a multiple of the increment, and the fraction of
 # the increment to spend once we are.
 LOW_CLOCK_MULTIPLE = 10
@@ -1492,7 +1502,7 @@ def get_move(fen: str, time_left_ms: int) -> str:
             # gets no rope at all past the target.
             expected = (now - iteration_started) * 2.0
             iteration_started = now
-            if elapsed + expected > soft * (1.3 if stable < 4 else 0.9):
+            if elapsed + expected > soft * (REACH if stable < 4 else SETTLED_REACH):
                 break
     except TimeUp:
         pass

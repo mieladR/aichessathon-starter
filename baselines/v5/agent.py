@@ -25,22 +25,11 @@ import math
 import random
 import sys
 import time
-from typing import Any
 
 import chess
+import fasteval
 
 import endgame
-
-# The compiled evaluation is an optimisation, not a dependency. If numba is
-# missing or will not compile on the machine we are handed, the Python
-# evaluation below is still correct, and a slower correct agent beats no agent.
-try:
-    import fasteval
-
-    _evaluator: Any = fasteval
-except Exception as _exc:
-    _evaluator = None
-    print(f"fasteval unavailable, using the Python evaluation: {_exc!r}")
 
 # Alpha-beta recurses one Python frame per ply, and check extensions on top of
 # quiescence can stack a hundred of them on a forcing line. The default limit
@@ -603,22 +592,17 @@ def _ordinary_score(board: chess.Board) -> int:
     return (tapered if board.turn == chess.WHITE else -tapered) + TEMPO
 
 
-if _evaluator is not None:
-    try:
-        _evaluator.install(
-            MG_WHITE, EG_WHITE, MG_BLACK, EG_BLACK, PHASE_WEIGHT,
-            FORWARD_FILE, PASSED_MASK, KING_SHIELD_MASK,
-            KING_DANGER, MOBILITY_MG, MOBILITY_EG, KING_ATTACK_WEIGHT,
-        )
-    except Exception as _exc:  # a compile failure is not worth a lost game
-        _evaluator = None
-        print(f"fasteval would not compile, using the Python evaluation: {_exc!r}")
+fasteval.install(
+    MG_WHITE, EG_WHITE, MG_BLACK, EG_BLACK, PHASE_WEIGHT,
+    FORWARD_FILE, PASSED_MASK, KING_SHIELD_MASK,
+    KING_DANGER, MOBILITY_MG, MOBILITY_EG, KING_ATTACK_WEIGHT,
+)
 
 
 def _compiled_score(board: chess.Board) -> int:
     """The same number as `_ordinary_score`, computed by the compiled version."""
     return int(
-        _evaluator.score(
+        fasteval.score(
             board.pawns,
             board.knights,
             board.bishops,
@@ -632,7 +616,7 @@ def _compiled_score(board: chess.Board) -> int:
     )
 
 
-def _compiled_agrees(positions: int = 1200) -> bool:
+def _compiled_agrees(positions: int = 300) -> bool:
     """Walk random games and insist the two evaluations return the same number.
 
     numba is the one thing here whose behaviour we cannot fully predict on a
@@ -657,7 +641,7 @@ def _compiled_agrees(positions: int = 1200) -> bool:
 
 
 _started_at = time.monotonic()
-_USE_COMPILED = _evaluator is not None and _compiled_agrees()
+_USE_COMPILED = _compiled_agrees()
 _score_position = _compiled_score if _USE_COMPILED else _ordinary_score
 print(
     f"evaluation: {'compiled' if _USE_COMPILED else 'PYTHON FALLBACK'}, "
@@ -1497,13 +1481,6 @@ def get_move(fen: str, time_left_ms: int) -> str:
     except TimeUp:
         pass
     except Exception as exc:  # a crash here is an instant loss, so catch everything
-        # Whatever went wrong, do not spend the rest of the game rediscovering
-        # it. The Python evaluation is the one we can reason about, so drop to
-        # it permanently and keep playing.
-        global _score_position
-        if _score_position is not _ordinary_score:
-            _score_position = _ordinary_score
-            print("dropped to the Python evaluation for the rest of the game")
         print(f"search error, falling back: {exc!r}")
 
     if best_move not in legal_moves:

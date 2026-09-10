@@ -22,25 +22,12 @@ moves within a single game.
 from __future__ import annotations
 
 import math
-import random
 import sys
 import time
-from typing import Any
 
 import chess
 
 import endgame
-
-# The compiled evaluation is an optimisation, not a dependency. If numba is
-# missing or will not compile on the machine we are handed, the Python
-# evaluation below is still correct, and a slower correct agent beats no agent.
-try:
-    import fasteval
-
-    _evaluator: Any = fasteval
-except Exception as _exc:
-    _evaluator = None
-    print(f"fasteval unavailable, using the Python evaluation: {_exc!r}")
 
 # Alpha-beta recurses one Python frame per ply, and check extensions on top of
 # quiescence can stack a hundred of them on a forcing line. The default limit
@@ -463,13 +450,15 @@ def _lone_king_score(board: chess.Board, loser: chess.Color) -> int:
     return material - drive if loser == chess.WHITE else material + drive
 
 
-def _ordinary_score(board: chess.Board) -> int:
-    """The evaluation proper, for a position with no solved endgame shortcut.
+def evaluate(board: chess.Board) -> int:
+    """Score `board` from the perspective of the side to move (negamax convention)."""
+    if endgame.is_pawn_ending(board):
+        return _pawn_ending_score(board)
+    loser = _bare_king_side(board)
+    if loser is not None:
+        white_relative = _lone_king_score(board, loser)
+        return white_relative if board.turn == chess.WHITE else -white_relative
 
-    This is the readable definition of what a position is worth, and it stays
-    the authority even when the compiled twin in `fasteval` is what actually
-    runs: that module is checked against this one at import.
-    """
     white = board.occupied_co[chess.WHITE]
     black = board.occupied_co[chess.BLACK]
     occupied = board.occupied
@@ -601,79 +590,6 @@ def _ordinary_score(board: chess.Board) -> int:
     # which is a bias towards one colour and nothing else.
     tapered = int((mg * phase + eg * (MAX_PHASE - phase)) / MAX_PHASE)
     return (tapered if board.turn == chess.WHITE else -tapered) + TEMPO
-
-
-if _evaluator is not None:
-    try:
-        _evaluator.install(
-            MG_WHITE, EG_WHITE, MG_BLACK, EG_BLACK, PHASE_WEIGHT,
-            FORWARD_FILE, PASSED_MASK, KING_SHIELD_MASK,
-            KING_DANGER, MOBILITY_MG, MOBILITY_EG, KING_ATTACK_WEIGHT,
-        )
-    except Exception as _exc:  # a compile failure is not worth a lost game
-        _evaluator = None
-        print(f"fasteval would not compile, using the Python evaluation: {_exc!r}")
-
-
-def _compiled_score(board: chess.Board) -> int:
-    """The same number as `_ordinary_score`, computed by the compiled version."""
-    return int(
-        _evaluator.score(
-            board.pawns,
-            board.knights,
-            board.bishops,
-            board.rooks,
-            board.queens,
-            board.kings,
-            board.occupied_co[chess.WHITE],
-            board.occupied_co[chess.BLACK],
-            board.turn,
-        )
-    )
-
-
-def _compiled_agrees(positions: int = 1200) -> bool:
-    """Walk random games and insist the two evaluations return the same number.
-
-    numba is the one thing here whose behaviour we cannot fully predict on a
-    machine we never see, and a silently different evaluation would play bad
-    moves for a whole game without ever looking broken. Checking costs a
-    fraction of a second of the import budget, and the cost of being wrong is
-    the game.
-    """
-    generator = random.Random(20260910)
-    board = chess.Board()
-    for _ in range(positions):
-        moves = list(board.legal_moves)
-        if not moves or board.is_game_over():
-            board = chess.Board()
-            continue
-        board.push(generator.choice(moves))
-        if endgame.is_pawn_ending(board) or _bare_king_side(board) is not None:
-            continue
-        if _compiled_score(board) != _ordinary_score(board):
-            return False
-    return True
-
-
-_started_at = time.monotonic()
-_USE_COMPILED = _evaluator is not None and _compiled_agrees()
-_score_position = _compiled_score if _USE_COMPILED else _ordinary_score
-print(
-    f"evaluation: {'compiled' if _USE_COMPILED else 'PYTHON FALLBACK'}, "
-    f"ready in {time.monotonic() - _started_at:.1f}s"
-)
-
-
-def evaluate(board: chess.Board) -> int:
-    """Score `board` from the perspective of the side to move (negamax convention)."""
-    if endgame.is_pawn_ending(board):
-        return _pawn_ending_score(board)
-    loser = _bare_king_side(board)
-    if loser is not None:
-        white_relative = _lone_king_score(board, loser)
-        return white_relative if board.turn == chess.WHITE else -white_relative
-    return _score_position(board)
 
 
 # ---------------------------------------------------------------------------
@@ -1497,13 +1413,6 @@ def get_move(fen: str, time_left_ms: int) -> str:
     except TimeUp:
         pass
     except Exception as exc:  # a crash here is an instant loss, so catch everything
-        # Whatever went wrong, do not spend the rest of the game rediscovering
-        # it. The Python evaluation is the one we can reason about, so drop to
-        # it permanently and keep playing.
-        global _score_position
-        if _score_position is not _ordinary_score:
-            _score_position = _ordinary_score
-            print("dropped to the Python evaluation for the rest of the game")
         print(f"search error, falling back: {exc!r}")
 
     if best_move not in legal_moves:
